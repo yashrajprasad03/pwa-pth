@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Physio Tracker</title>
+<link rel="manifest" href="manifest.json"><meta name="theme-color" content="#0F766E">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<style>
+:root{--bg:#F2F5F4;--card:#fff;--ink:#12262B;--mut:#5C7176;--acc:#0F766E;--on:#fff;--line:#D8E2E0;--bad:#B3261E}
+@media(prefers-color-scheme:dark){:root{--bg:#0E1A1D;--card:#15262A;--ink:#E6F0EF;--mut:#8FA7AA;--acc:#34C3B3;--on:#0E1A1D;--line:#26403F;--bad:#F2918B}}
+*{box-sizing:border-box}html,body{margin:0}
+body{font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink);padding-top:env(safe-area-inset-top,0)}
+#main{max-width:640px;margin:0 auto;padding:16px 16px 96px}
+header,.sh,.row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+h1{font-size:26px;margin:8px 0}h2{font-size:18px;margin:20px 0 8px}h3{margin:0 0 8px}
+button,select,input,textarea{font:inherit;color:inherit}
+button{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px;min-height:44px}
+button.pri{background:var(--acc);color:var(--on);border-color:var(--acc);font-weight:600}
+button.danger{color:var(--bad);width:100%;margin-top:28px}
+input,textarea,select{width:100%;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;min-height:44px}
+textarea{min-height:80px}label{display:block;margin:10px 0;font-size:14px;color:var(--mut)}
+.item{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:8px 0}
+.item small{display:block;color:var(--mut)}.item.late{border-left:4px solid var(--bad)}.item.today{border-left:4px solid var(--acc)}
+.empty,.meta,.note{color:var(--mut)}.note{white-space:pre-wrap}
+.day{margin:18px 0 4px;font-weight:700;color:var(--acc)}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0)}
+nav button{flex:1;border:0;border-radius:0;background:none;color:var(--mut);min-height:56px}nav button.on{color:var(--acc);font-weight:700;box-shadow:inset 0 3px var(--acc)}
+dialog{border:1px solid var(--line);border-radius:16px;background:var(--bg);color:var(--ink);width:min(92vw,460px);padding:18px}
+dialog::backdrop{background:#0008}
+</style></head><body>
+<div id="main"></div><datalist id="quick"></datalist><dialog id="dlg"></dialog>
+<nav><button data-t="patients">Patients</button><button data-t="schedule">Schedule</button><button data-t="teams">Teams</button><button data-t="settings">Settings</button></nav>
+<script>
+const $=s=>document.querySelector(s),main=$('#main');
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+const today=()=>new Date().toLocaleDateString('en-CA');
+const fmt=a=>new Date(a).toLocaleString([],{weekday:'short',day:'numeric',month:'short',hour:'numeric',minute:'2-digit'});
+let db,v={tab:'patients'},S={patients:[],teams:[],cfg:{id:'cfg',remind:60,quick:['Taping','Ice / cryotherapy','Massage','Stretching','Strapping','Mobilisation']}};
+const open=()=>new Promise((res,rej)=>{const r=indexedDB.open('physio',1);r.onupgradeneeded=()=>['patients','teams','settings'].forEach(n=>r.result.createObjectStore(n,{keyPath:'id'}));r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+const tx=(s,m,f)=>new Promise((res,rej)=>{const t=db.transaction(s,m),q=f(t.objectStore(s));t.oncomplete=()=>res(q&&q.result);t.onerror=()=>rej(t.error)});
+const all=s=>tx(s,'readonly',st=>st.getAll()),put=(s,o)=>tx(s,'readwrite',st=>st.put(o)),del=(s,id)=>tx(s,'readwrite',st=>st.delete(id)),clr=s=>tx(s,'readwrite',st=>st.clear());
+const saveP=p=>put('patients',p).then(render),saveT=t=>put('teams',t).then(render),saveC=()=>put('settings',S.cfg);
+
+function ask(title,fields,cb,vals={}){const d=$('#dlg');
+ d.innerHTML=`<form><h3>${title}</h3>${fields.map((f,i)=>`<label>${f[1]}${f[2]=='area'?`<textarea name="${f[0]}">${esc(vals[f[0]])}</textarea>`:`<input name="${f[0]}" type="${f[2]||'text'}" value="${esc(vals[f[0]])}" ${f[3]?'list="'+f[3]+'"':''} ${i==0?'required':''}>`}</label>`).join('')}<div class="row"><button type="button" onclick="dlg.close()">Cancel</button><button class="pri">Save</button></div></form>`;
+ d.querySelector('form').onsubmit=e=>{e.preventDefault();cb(Object.fromEntries(new FormData(e.target)));d.close()};d.showModal()}
+const sure=(m,f)=>confirm(m)&&f();
+
+/* notifications */
+async function ensureNotif(){if('Notification' in window&&Notification.permission=='default')await Notification.requestPermission()}
+async function notify(t,b){if(!('Notification' in window)||Notification.permission!='granted')return;
+ const r=await navigator.serviceWorker?.ready;r?r.showNotification(t,{body:b,icon:'icon-192.png'}):new Notification(t,{body:b})}
+async function check(){const now=Date.now();for(const p of S.patients){let ch=0;
+ for(const x of p.visits||[]){if(x.status!='upcoming'||x.n)continue;const at=new Date(x.at).getTime();
+  if(at>now&&at-now<=S.cfg.remind*60000){await notify('Visit: '+p.name,fmt(x.at));x.n=1;ch=1}}
+ if(ch)await put('patients',p)}}
+
+/* views */
+const nextV=p=>(p.visits||[]).filter(x=>x.status=='upcoming').sort((a,b)=>a.at.localeCompare(b.at))[0];
+function render(){document.querySelectorAll('nav button').forEach(b=>b.classList.toggle('on',b.dataset.t==v.tab));
+ $('#quick').innerHTML=S.cfg.quick.map(q=>`<option value="${esc(q)}">`).join('');
+ ({patients:rPatients,schedule:rSched,teams:rTeams,settings:rSet})[v.tab]()}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{v={tab:b.dataset.t};render()});
+
+function rPatients(){if(v.pid)return rPatient();
+ main.innerHTML=`<header><h1>Patients</h1><button class="pri" onclick="addP()">+ New</button></header><input id="q" placeholder="Search patients" value="${esc(v.q||'')}"><div id="pl"></div>`;
+ const draw=()=>{const q=(v.q||'').toLowerCase(),l=S.patients.filter(p=>p.name.toLowerCase().includes(q)).sort((a,b)=>a.name.localeCompare(b.name));
+  $('#pl').innerHTML=l.length?l.map(p=>{const n=nextV(p);return`<div class="item" onclick="v.pid='${p.id}';render()"><b>${esc(p.name)}</b><small>${esc(p.cond||'No condition noted')}</small>${n?`<small>Next visit: ${fmt(n.at)}</small>`:''}</div>`}).join(''):'<p class="empty">No patients yet. Tap + New to add your first one.</p>'};
+ $('#q').oninput=e=>{v.q=e.target.value;draw()};draw()}
+const PF=[['name','Name'],['age','Age','number'],['phone','Phone','tel'],['cond','Condition / diagnosis'],['notes','Notes','area']];
+const addP=()=>ask('New patient',PF,async o=>{const p={id:uid(),visits:[],tx:[],...o};S.patients.push(p);await put('patients',p);v.pid=p.id;render()});
+const P=()=>S.patients.find(x=>x.id==v.pid);
+const editP=()=>ask('Edit patient',PF,o=>{Object.assign(P(),o);saveP(P())},P());
+const delP=()=>sure('Delete this patient and all their records?',async()=>{await del('patients',v.pid);S.patients=S.patients.filter(x=>x.id!=v.pid);v.pid=null;render()});
+const addV=()=>{ensureNotif();ask('Schedule visit',[['at','Date and time','datetime-local']],o=>{P().visits.push({id:uid(),at:o.at,status:'upcoming'});saveP(P())})};
+const setV=(id,s)=>{const x=P().visits.find(y=>y.id==id);x.status=s;saveP(P())};
+const delV=id=>sure('Delete this visit?',()=>{P().visits=P().visits.filter(y=>y.id!=id);saveP(P())});
+const addT=()=>ask('Log treatment',[['t','Treatment','text','quick'],['d','Date','date'],['n','Notes / progress','area']],o=>{P().tx.push({id:uid(),...o});saveP(P())},{d:today()});
+const delT=id=>sure('Delete this entry?',()=>{P().tx=P().tx.filter(y=>y.id!=id);saveP(P())});
+function rPatient(){const p=P();if(!p){v.pid=null;return render()}
+ const tr=[...p.tx].sort((a,b)=>b.d.localeCompare(a.d)),vs=[...p.visits].sort((a,b)=>a.at.localeCompare(b.at));
+ main.innerHTML=`<header><button onclick="v.pid=null;render()">‹ Back</button><button onclick="editP()">Edit</button></header>
+ <h1>${esc(p.name)}</h1><p class="meta">${[p.age&&p.age+' yrs',p.phone].filter(Boolean).map(esc).join(', ')}</p>
+ <p><b>Condition:</b> ${esc(p.cond||'Not noted')}</p><p class="note">${esc(p.notes)}</p>
+ <div class="sh"><h2>Visits</h2><button class="pri" onclick="addV()">+ Visit</button></div>
+ ${vs.map(x=>`<div class="item"><b>${fmt(x.at)}</b><div class="row" style="margin-top:6px"><select onchange="setV('${x.id}',this.value)">${['upcoming','done','missed'].map(s=>`<option ${s==x.status?'selected':''}>${s}</option>`).join('')}</select><button onclick="delV('${x.id}')">Delete</button></div></div>`).join('')||'<p class="empty">No visits scheduled.</p>'}
+ <div class="sh"><h2>Treatment log</h2><button class="pri" onclick="addT()">+ Treatment</button></div>
+ ${tr.map(x=>`<div class="item"><b>${esc(x.t)}</b><small>${x.d}</small><div class="note">${esc(x.n)}</div><button onclick="delT('${x.id}')" style="margin-top:6px">Delete</button></div>`).join('')||'<p class="empty">No treatments logged yet.</p>'}
+ <button class="danger" onclick="delP()">Delete patient</button>`}
+
+function rSched(){const now=Date.now(),l=[];S.patients.forEach(p=>p.visits.forEach(x=>x.status=='upcoming'&&l.push({p,x})));
+ l.sort((a,b)=>a.x.at.localeCompare(b.x.at));let last='';
+ main.innerHTML=`<h1>Schedule</h1>`+(l.length?l.map(({p,x})=>{const d=new Date(x.at),k=d.toDateString(),late=d<now,td=k==new Date().toDateString();
+  const h=k!=last?`<div class="day">${td?'Today':d.toLocaleDateString([],{weekday:'long',day:'numeric',month:'short'})}</div>`:'';last=k;
+  return h+`<div class="item ${late?'late':td?'today':''}" onclick="v={tab:'patients',pid:'${p.id}'};render()"><b>${esc(p.name)}</b><small>${d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'})}${late?' (past due, update status)':''}</small></div>`}).join(''):'<p class="empty">No upcoming visits. Add one from a patient profile.</p>')}
+
+const T=()=>S.teams.find(x=>x.id==v.tid),PL=()=>T().players.find(x=>x.id==v.plid);
+function rTeams(){if(v.tid&&!T())v.tid=null;if(v.tid&&v.plid)return rPlayer();if(v.tid)return rTeam();
+ main.innerHTML=`<header><h1>Teams</h1><button class="pri" onclick="addTeam()">+ Team</button></header>`+
+ (S.teams.map(t=>`<div class="item" onclick="v.tid='${t.id}';render()"><b>${esc(t.name)}</b><small>${esc(t.sport||'')} ${t.players.length} players</small></div>`).join('')||'<p class="empty">No teams yet. Add the team you cover on the field.</p>')}
+const TF=[['name','Team name'],['sport','Sport / event']];
+const addTeam=()=>ask('New team',TF,async o=>{const t={id:uid(),players:[],...o};S.teams.push(t);await put('teams',t);v.tid=t.id;render()});
+const editTeam=()=>ask('Edit team',TF,o=>{Object.assign(T(),o);saveT(T())},T());
+const delTeam=()=>sure('Delete this team and its players?',async()=>{await del('teams',v.tid);S.teams=S.teams.filter(x=>x.id!=v.tid);v.tid=null;render()});
+function rTeam(){const t=T();main.innerHTML=`<header><button onclick="v.tid=null;render()">‹ Back</button><button onclick="editTeam()">Edit</button></header>
+ <h1>${esc(t.name)}</h1><p class="meta">${esc(t.sport)}</p><div class="sh"><h2>Players</h2><button class="pri" onclick="addPl()">+ Player</button></div>
+ ${t.players.map(x=>`<div class="item" onclick="v.plid='${x.id}';render()"><b>${x.no?'#'+esc(x.no)+' ':''}${esc(x.name)}</b><small>${esc(x.notes||'')}</small><small>${x.tx.length} treatments logged</small></div>`).join('')||'<p class="empty">No players yet.</p>'}
+ <button class="danger" onclick="delTeam()">Delete team</button>`}
+const XF=[['name','Player name'],['no','Jersey number'],['notes','Injuries / notes','area']];
+const addPl=()=>ask('New player',XF,o=>{T().players.push({id:uid(),tx:[],...o});saveT(T())});
+const editPl=()=>ask('Edit player',XF,o=>{Object.assign(PL(),o);saveT(T())},PL());
+const delPl=()=>sure('Remove this player?',()=>{T().players=T().players.filter(x=>x.id!=v.plid);v.plid=null;saveT(T())});
+const addPT=()=>ask('Log treatment',[['t','Treatment','text','quick'],['d','Date','date'],['n','Injury / notes','area']],o=>{PL().tx.push({id:uid(),...o});saveT(T())},{d:today()});
+const delPT=id=>sure('Delete this entry?',()=>{PL().tx=PL().tx.filter(y=>y.id!=id);saveT(T())});
+function rPlayer(){const x=PL();if(!x){v.plid=null;return render()};const tr=[...x.tx].sort((a,b)=>b.d.localeCompare(a.d));
+ main.innerHTML=`<header><button onclick="v.plid=null;render()">‹ ${esc(T().name)}</button><button onclick="editPl()">Edit</button></header>
+ <h1>${x.no?'#'+esc(x.no)+' ':''}${esc(x.name)}</h1><p class="note">${esc(x.notes)}</p>
+ <div class="sh"><h2>Treatments</h2><button class="pri" onclick="addPT()">+ Treatment</button></div>
+ ${tr.map(y=>`<div class="item"><b>${esc(y.t)}</b><small>${y.d}</small><div class="note">${esc(y.n)}</div><button onclick="delPT('${y.id}')" style="margin-top:6px">Delete</button></div>`).join('')||'<p class="empty">No treatments logged yet.</p>'}
+ <button class="danger" onclick="delPl()">Remove player</button>`}
+
+async function rSet(){const pst=await navigator.storage?.persisted?.();
+ main.innerHTML=`<h1>Settings</h1>
+ <label>Remind me before each visit<select id="rm">${[[15,'15 minutes'],[30,'30 minutes'],[60,'1 hour'],[120,'2 hours'],[1440,'1 day']].map(([m,l])=>`<option value="${m}" ${m==S.cfg.remind?'selected':''}>${l}</option>`).join('')}</select></label>
+ <p class="meta">Notifications: ${'Notification' in window?Notification.permission:'not supported'}. Reminders fire while the app is open or running in the background; on iPhone, install to Home Screen first.</p>
+ <button onclick="ensureNotif().then(render)">Allow notifications</button>
+ <label>Quick treatments (comma separated)<textarea id="qt">${esc(S.cfg.quick.join(', '))}</textarea></label>
+ <h2>Backup</h2><p class="meta">Permanent storage: ${pst?'on':'not granted (back up regularly)'}. Last backup: ${S.cfg.lastBackup?new Date(S.cfg.lastBackup).toLocaleDateString():'never'}.</p>
+ <div class="row"><button class="pri" onclick="exp()">Export backup</button><button onclick="$('#imp').click()">Import backup</button></div><input id="imp" type="file" accept=".json" hidden>`;
+ $('#rm').onchange=e=>{S.cfg.remind=+e.target.value;saveC()};
+ $('#qt').onchange=e=>{S.cfg.quick=e.target.value.split(',').map(s=>s.trim()).filter(Boolean);saveC().then(render)};
+ $('#imp').onchange=imp}
+function exp(){const b=new Blob([JSON.stringify({patients:S.patients,teams:S.teams,cfg:S.cfg})],{type:'application/json'}),a=document.createElement('a');
+ a.href=URL.createObjectURL(b);a.download='physio-backup-'+today()+'.json';a.click();S.cfg.lastBackup=Date.now();saveC().then(render)}
+async function imp(e){const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text());
+ if(!Array.isArray(d.patients)||!Array.isArray(d.teams))throw 0;if(!confirm('Replace all current data with this backup?'))return;
+ await clr('patients');await clr('teams');for(const p of d.patients)await put('patients',p);for(const t of d.teams)await put('teams',t);
+ if(d.cfg)S.cfg=d.cfg;await saveC();await load();alert('Backup restored.');render()}catch{alert('That file is not a valid backup.')}}
+
+async function load(){S.patients=await all('patients');S.teams=await all('teams');const c=(await all('settings'))[0];if(c)S.cfg=c}
+(async()=>{db=await open();await load();navigator.storage?.persist?.();render();check();setInterval(check,30000);
+ document.addEventListener('visibilitychange',()=>!document.hidden&&check());
+ if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js')})();
+</script></body></html>
